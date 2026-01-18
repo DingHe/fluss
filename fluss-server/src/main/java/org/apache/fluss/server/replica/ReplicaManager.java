@@ -136,31 +136,47 @@ import static org.apache.fluss.utils.Preconditions.checkState;
 import static org.apache.fluss.utils.concurrent.LockUtils.inLock;
 
 /** A manager for replica. */
+// ReplicaManager（副本管理器）是 Apache Fluss 架构中 Tablet Server 侧的核心组件。
+// 它不仅负责管理当前节点上托管的所有副本（Leader 或 Follower），还协调着数据的读写流转、副本同步以及状态切换。
+// ReplicaManager 的作用可以类比为 Kafka 中的同名组件，其主要职责包括：
+// 状态转换管理：处理来自协调者（Coordinator）的请求，控制副本在 Leader 和 Follower 身份之间切换，或者停止并删除副本。
+// 读写调度：作为数据平面入口，分发 Log 写入、KV 写入、Log 读取以及 KV 查询（Lookup）请求到对应的物理副本。
+// 副本同步控制：管理 ReplicaFetcherManager，启动拉取线程从其他 Leader 节点同步数据，并负责 ISR（同步副本集）的收缩与扩展。
+// 存储协调：管理本地 Log 存储、本地 KV 引擎，并与远程日志管理器（RemoteLogManager）交互，实现分层存储。
+
 public class ReplicaManager {
     private static final Logger LOG = LoggerFactory.getLogger(ReplicaManager.class);
 
     public static final String HIGH_WATERMARK_CHECKPOINT_FILE_NAME = "high-watermark-checkpoint";
+    // 存储 Tablet Server 的全局配置。
     private final Configuration conf;
+    // 调度器
     private final Scheduler scheduler;
+    // 分别管理本地磁盘上的日志文件和 KV 状态存储（RocksDB 等）。
     private final LogManager logManager;
     private final KvManager kvManager;
+    // 与 ZooKeeper 交互，获取或更新集群元数据。
     private final ZooKeeperClient zkClient;
     protected final int serverId;
     private final AtomicBoolean highWatermarkCheckPointThreadStarted = new AtomicBoolean(false);
+    // 定期将所有副本的高水位（High Watermark）持久化到磁盘，用于宕机恢复。
     private final OffsetCheckpointFile highWatermarkCheckpoint;
-
+    // 维护 TableBucket 到 HostedReplica 的映射。HostedReplica 可能是 Online（正常）、Offline（损坏）或 None（不存在）
     @GuardedBy("replicaStateChangeLock")
     private final Map<TableBucket, HostedReplica> allReplicas = MapUtils.newConcurrentHashMap();
-
+    // 缓存集群的元数据（如 TableInfo、各节点地址），用于路由和身份校验。
     private final TabletServerMetadataCache metadataCache;
     private final ExecutorService ioExecutor;
+    // 缓存列投影信息，优化读取时的 CPU 开销。
     private final ProjectionPushdownCache projectionsCache = new ProjectionPushdownCache();
+    // 保证副本状态切换（如从 Follower 变 Leader）时的线程安全
     private final Lock replicaStateChangeLock = new ReentrantLock();
 
     /**
      * delayed write operation manager is used to manage the delayed write operation, which is
      * waited for other follower replicas ack.
      */
+    // 管理等待多副本确认（acks=all）的写入请求。
     private final DelayedOperationManager<DelayedWrite<?>> delayedWriteManager;
 
     /**
@@ -168,13 +184,15 @@ public class ReplicaManager {
      * is waited for the available fetch log size bigger than the minLogFetchSize or the wait time
      * is up.
      */
+    // 管理由于数据不足或等待新偏移量而挂起的读取请求。
     private final DelayedOperationManager<DelayedFetchLog> delayedFetchLogManager;
-
+    // 负责管理指向其他副本的拉取线程（Follower 角色使用）
     private final ReplicaFetcherManager replicaFetcherManager;
     // The manager used to manager the replica alter, especially the isr expand and shrink.
     private final AdjustIsrManager adjustIsrManager;
     private final FatalErrorHandler fatalErrorHandler;
 
+    // 记录最后一个下发指令的协调者的版本号，防止由于网络延迟导致的旧指令覆盖新指令。
     /** epoch of the coordinator that last changed the leader. */
     @GuardedBy("replicaStateChangeLock")
     private volatile int coordinatorEpoch = CoordinatorContext.INITIAL_COORDINATOR_EPOCH;
@@ -182,11 +200,12 @@ public class ReplicaManager {
     // for kv snapshot
     private final KvSnapshotResource kvSnapshotResource;
     private final SnapshotContext kvSnapshotContext;
-
+    // 负责将本地日志上传到远端对象存储（如 S3/OSS）的组件。
     // remote log manager for remote log storage.
     private final RemoteLogManager remoteLogManager;
 
     // for metrics
+    // 负责监控指标（如副本数、读写吞吐）的收集。
     private final TabletServerMetricGroup serverMetricGroup;
     private final UserMetrics userMetrics;
     private final String internalListenerName;

@@ -26,13 +26,23 @@ import javax.annotation.Nullable;
 import java.util.Objects;
 
 /** A base source split for {@link SnapshotSplit} and {@link LogSplit}. */
+// 实现了 Flink 的 SourceSplit 接口，定义了所有 Fluss 数据分片（Split）的共同特征。
+// 在 Flink 的新版 Source 架构（FLIP-27）中，Split（分片） 是并行读取的最小单元。
+// SourceSplitBase 及其子类决定了 Reader 应该从哪个位置开始读取、读取哪些数据。
+// Fluss 是一个湖仓一体的存储系统，它支持多种读取模式：
+// 快照读取 (Snapshot Split)：读取历史全量数据。
+// 日志读取 (Log Split)：读取增量流式日志。
+// 混合读取 (Hybrid Split)：结合了从湖（Lake）读取历史数据和从 Fluss 读取实时增量的逻辑。
+
 public abstract class SourceSplitBase implements SourceSplit {
-
+    // 混合快照分片的类型标识。
+    // 主要用于序列化和反序列化过程，帮助系统识别字节流对应的具体子类。
     public static final byte HYBRID_SNAPSHOT_SPLIT_FLAG = 1;
+    // 日志分片的类型标识。
     public static final byte LOG_SPLIT_FLAG = 2;
-
+    // 该分片所属的逻辑位置。
     protected final TableBucket tableBucket;
-
+    // 存储分区的名称（
     @Nullable protected final String partitionName;
 
     public SourceSplitBase(TableBucket tableBucket, @Nullable String partitionName) {
@@ -44,7 +54,7 @@ public abstract class SourceSplitBase implements SourceSplit {
                     "Partition name and partition id must be both null or both not null.");
         }
     }
-
+    // 生成 Flink 框架要求的唯一分片 ID 字符串。
     protected static String toSplitId(String splitPrefix, TableBucket tableBucket) {
         if (tableBucket.getPartitionId() != null) {
             return splitPrefix

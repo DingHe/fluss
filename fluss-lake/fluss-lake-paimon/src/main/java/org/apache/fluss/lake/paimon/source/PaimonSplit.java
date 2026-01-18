@@ -28,10 +28,12 @@ import java.util.Collections;
 import java.util.List;
 
 /** Split for paimon table. */
+// PaimonSplit 是 Fluss 与 Apache Paimon 数据湖格式对接的具体实现类。它实现了 LakeSplit 接口，充当了 Fluss 与 Paimon 之间的“翻译官”。
 public class PaimonSplit implements LakeSplit {
-
+    // 持有 Paimon 原生的数据切片对象
     private final DataSplit dataSplit;
-
+    // 标记当前表是否为“非桶感知（Bucket-unaware）”模式。
+    // Paimon 支持“有桶”和“无桶”模式。如果是无桶模式（通常用于 Append-only 表），数据不根据 Key 分布到特定的 Bucket，此时读取策略会有所不同。
     private final boolean isBucketUnAware;
 
     public PaimonSplit(DataSplit dataSplit, boolean isBucketUnAware) {

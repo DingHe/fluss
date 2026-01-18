@@ -160,17 +160,24 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
 
     @Override
     public void shutdown() {}
-
+    // 处理日志写入请求（Data Ingestion）的入口。
+    // 它负责权限校验、数据解析，并最终将请求交给副本管理器执行。
     @Override
     public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
+        // 执行 ACL（访问控制列表）检查。
+        // 在处理任何数据之前，系统先根据当前会话的用户信息，检查该用户是否对指定的 tableId 拥有 WRITE（写入）权限。
+        // 如果校验失败，此行会直接抛出安全异常（如 AuthorizationException）
         authorizeTable(WRITE, request.getTableId());
         CompletableFuture<ProduceLogResponse> response = new CompletableFuture<>();
+        // 将请求体中的原始数据解析为内部处理格式。
         Map<TableBucket, MemoryLogRecords> produceLogData = getProduceLogData(request);
         replicaManager.appendRecordsToLog(
-                request.getTimeoutMs(),
-                request.getAcks(),
-                produceLogData,
+                request.getTimeoutMs(), // 写入超时时间。如果在这个时间内没能完成 acks 指定的同步要求，请求将报错。
+                request.getAcks(), // 确认策略（如 0, 1, 或 -1/all）。决定了数据需要同步到多少个副本才算成功。
+                produceLogData, // 刚才解析好的待写入数据
                 new UserContext(currentSession().getPrincipal()),
+                // 回调钩子。当 ReplicaManager 完成了所有分桶的写入（并达到了指定的 acks 确认数）后，会触发这个 Lambda。
+                // 它会将执行结果（bucketResponseMap）封装成 ProduceLogResponse 对象，并通过 response.complete() 唤醒等待的客户端。
                 bucketResponseMap -> response.complete(makeProduceLogResponse(bucketResponseMap)));
         return response;
     }

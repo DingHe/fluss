@@ -39,19 +39,26 @@ import java.util.stream.Collectors;
  * This class encapsulates a thread-safe navigable map of LogSegment instances and provides the
  * required read and write behavior on the map.
  */
+// 专门用于管理一个 LogTablet（日志分片） 下所属的所有 LogSegment（日志段）。
+// 在 Fluss 中，日志文件不是无限增长的，而是被切分成多个段（Segment）。这个类通过一个线程安全的跳表结构，维护了这些段的有序映射。
+// 段容器管理：作为 LogSegment 实例的容器，负责段的增加、删除、清理和查询。
+// 有序检索：利用 ConcurrentSkipListMap 的特性，支持根据 Offset（偏移量）快速定位数据所在的段。
+// 活跃段维护：方便地获取当前正在写入的“活跃段（Active Segment）”。
+// 范围查找：支持获取特定偏移量范围内的所有段，用于数据读取或日志清理（Retention）。
 @ThreadSafe
 @Internal
 public final class LogSegments {
-
+    // 标识当前这些日志段属于哪一个具体的表桶（Table Bucket）。
     private final TableBucket tableBucket;
-
+    // 核心数据结构。
+    // Key 是段的 baseOffset（起始偏移量），Value 是对应的 LogSegment 对象。使用跳表实现，保证了 Key 的有序性。
     private final ConcurrentNavigableMap<Long, LogSegment> segments;
 
     public LogSegments(TableBucket tableBucket) {
         this.tableBucket = tableBucket;
         segments = new ConcurrentSkipListMap<>();
     }
-
+    // 检查当前是否没有任何日志段。
     public boolean isEmpty() {
         return segments.isEmpty();
     }

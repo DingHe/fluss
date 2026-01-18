@@ -48,13 +48,17 @@ import static org.apache.fluss.lake.paimon.utils.PaimonConversions.toPaimon;
  * Paimon Lake format implementation of {@link org.apache.fluss.lake.source.LakeSource} for reading
  * paimon table.
  */
+// 对接 Apache Paimon 数据湖。它充当了 Fluss 查询引擎与 Paimon 存储层之间的“配置中心”和“组件工厂”。
+// PaimonLakeSource 的主要作用是协调和配置从 Paimon 表中读取数据的所有准备工作。
 public class PaimonLakeSource implements LakeSource<PaimonSplit> {
     private static final long serialVersionUID = 1L;
-
+    // 存储连接 Paimon Catalog 所需的配置信息（如数据湖根路径、文件系统参数等）。
     private final Configuration paimonConfig;
+    // 标识要读取的 Paimon 表在 Fluss 中的路径，后续会被转换为 Paimon 自己的 Identifier
     private final TablePath tablePath;
-
+    // 记录下推的列索引。如果是 null，代表读取所有列。
     private @Nullable int[][] project;
+    // 经过转换后的 Paimon 原生谓词对象，用于文件级别的过滤。
     private @Nullable org.apache.paimon.predicate.Predicate predicate;
 
     public PaimonLakeSource(Configuration paimonConfig, TablePath tablePath) {

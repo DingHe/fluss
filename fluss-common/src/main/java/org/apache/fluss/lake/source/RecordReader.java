@@ -33,6 +33,8 @@ import java.io.IOException;
  *
  * @since 0.8
  */
+// 在 Apache Fluss 的湖仓一体架构中，RecordReader 接口是数据读取路径上的最末端执行者。它负责执行物理读取操作，将存储在外部湖存储（如 S3、HDFS）中的原始文件内容转化为 Fluss 能够理解的内存记录对象。
+// 数据格式的转换器与流式提取器
 @PublicEvolving
 public interface RecordReader {
 

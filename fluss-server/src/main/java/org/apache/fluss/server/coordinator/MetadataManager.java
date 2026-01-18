@@ -74,15 +74,24 @@ import static org.apache.fluss.server.utils.TableDescriptorValidation.validateAl
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateTableDescriptor;
 
 /** A manager for metadata. */
+// 元数据操作的管家，负责管理数据库、表、分区和 Schema 的生命周期。
+// 该类主要通过与 ZooKeeper 交互来持久化元数据，并负责与 数据湖（Data Lake） 存储（如 Apache Paimon/Iceberg）进行元数据同步。
+// 元数据持久化：将数据库、表结构（Schema）、分区信息和桶分配（Bucket Assignment）注册到 ZooKeeper 中。
+// 湖仓元数据同步：当用户开启“数据湖”功能时，在 Fluss 中创建或修改表属性时，同步在底层湖存储中执行相应的 DDL 操作。
+// 安全性与合规性：验证 DDL 操作的合法性（如检查桶数量、分区数量限制），并过滤配置信息中的敏感信息（如密码）。
+// 一致性维护：确保元数据操作的原子性（例如先注册 Schema 再注册表）。
 public class MetadataManager {
 
     private static final Logger LOG = LoggerFactory.getLogger(MetadataManager.class);
-
+    // 用于与 ZooKeeper 集群直接通信的客户端，是所有元数据真正存储的地方。
     private final ZooKeeperClient zookeeperClient;
+    // 从配置中读取的单个表允许的最大分区数。用于防止元数据爆炸。
     private final int maxPartitionNum;
+    // 单个表或分区允许的最大桶（Bucket）数
     private final int maxBucketNum;
+    // 用于动态加载数据湖的 Catalog。如果表开启了 datalake.enabled，则通过它获取湖存储的句柄。
     private final LakeCatalogDynamicLoader lakeCatalogDynamicLoader;
-
+    // 一个静态集合，包含 password、secret、key 等关键字。用于在返回表信息时脱敏，防止敏感配置泄露
     public static final Set<String> SENSITIVE_TABLE_OPTIONS = new HashSet<>();
 
     static {

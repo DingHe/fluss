@@ -766,15 +766,23 @@ public class ServerRpcMessageUtils {
         stopReplicaResponse.addAllStopReplicasResps(stopReplicaRespForBucketList);
         return stopReplicaResponse;
     }
-
+    // 心作用是将客户端通过 RPC 发送的 Protobuf 格式的写入请求 转换为服务器内部处理使用的 Java 对象映射
     public static Map<TableBucket, MemoryLogRecords> getProduceLogData(
             ProduceLogRequest produceRequest) {
+        // 从请求对象中提取目标表的唯一标识 tableId
         long tableId = produceRequest.getTableId();
+        // 用于存放转换后的数据
+        // Key (TableBucket)：代表数据的目的地（哪张表、哪个分区、哪个桶）。
+        // Value (MemoryLogRecords)：代表该目的地对应的二进制日志数据内容。
         Map<TableBucket, MemoryLogRecords> produceEntryData = new HashMap<>();
+        // 客户端为了提高效率，通常会将多个桶的数据合并在一个 RPC 请求中发送。这里开始遍历每一个桶的具体写入请求。
         for (PbProduceLogReqForBucket produceLogReqForBucket :
                 produceRequest.getBucketsReqsList()) {
+            // 将 Protobuf 格式的字节片段（ByteString 或 Slice）转换为 Java 标准的 ByteBuffer。
             ByteBuffer recordBuffer = toByteBuffer(produceLogReqForBucket.getRecordsSlice());
+            // 通过 “零拷贝” 的方式，创建一个 MemoryLogRecords 对象
             MemoryLogRecords logRecords = MemoryLogRecords.pointToByteBuffer(recordBuffer);
+            // 构建分桶标识符 (TableBucket)
             TableBucket tb =
                     new TableBucket(
                             tableId,
@@ -782,6 +790,8 @@ public class ServerRpcMessageUtils {
                                     ? produceLogReqForBucket.getPartitionId()
                                     : null,
                             produceLogReqForBucket.getBucketId());
+
+            // 将构建好的“目的地 (tb)”和“数据内容 (logRecords)”关联起来，存入结果 Map 中。
             produceEntryData.put(tb, logRecords);
         }
         return produceEntryData;

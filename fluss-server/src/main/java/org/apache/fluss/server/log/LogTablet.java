@@ -79,41 +79,55 @@ import static org.apache.fluss.utils.Preconditions.checkArgument;
  * <p>LogTablet is a physical entity that is responsible for managing the log segments for a
  * particular table bucket.
  */
+// LogTablet 是一个物理实体，负责管理特定 Table Bucket（表分桶） 的所有日志数据。它的核心作用可以概括为以下几点：
+// 统一视图管理：它为上层提供了一个统一的视图，整合了本地日志 (Local Log)、远程存储日志 (Remote Log) 以及 数据湖日志 (Lakehouse Log)。无论数据存储在哪里，客户端都可以通过它进行读写。
+// 数据的持久化与同步：负责将内存中的记录（Records）追加（Append）到磁盘，管理日志分段（Segments）的滚动（Roll）和清理。
+// 状态维护：管理 High Watermark (高水位)、Log End Offset (日志末端位点) 等关键元数据，确保数据的可见性和一致性。
+// 幂等性支持：通过 WriterStateManager 管理写入者的状态，防止数据重复写入（去重）。
+// 多级存储联动：协调本地磁盘与远程存储/湖仓存储之间的数据迁移与生命周期管理。
 @ThreadSafe
 public final class LogTablet {
 
     private static final Logger LOG = LoggerFactory.getLogger(LogTablet.class);
-
+    // 该 Tablet 对应的物理路径信息，包含表名、分区、分桶 ID。
     private final PhysicalTablePath physicalPath;
-
+    // 负责本地磁盘上日志分段（Log Segments）的具体读写操作。
     @GuardedBy("lock")
     private final LocalLog localLog;
-
+    // 单个日志分段文件（Segment）的最大字节数，超过此值会滚动新文件。
     private final int maxSegmentFileSize;
+    // 刷盘阈值。累积多少条消息后强制将数据刷入磁盘。
     private final long logFlushIntervalMessages;
     // A lock that guards all modifications to the localLog.
+    // 用于保护 localLog 和 writerStateManager 修改操作的同步锁。
     private final Object lock = new Object();
-
+    // 管理写入者（Writer ID）的状态，用于实现幂等性写入和去重。
     @GuardedBy("lock")
     private final WriterStateManager writerStateManager;
-
+    // 调度器，用于执行定时任务（如过期 Writer ID 的清理）。
     private final Scheduler scheduler;
+    // 记录“检查并移除过期写入者状态”定时任务的句柄。
     private final ScheduledFuture<?> writerExpireCheck;
+    // 定义日志的存储格式（如 Arrow 格式或原生格式）。
     private final LogFormat logFormat;
     private final int tieredLogLocalSegments;
     private final Clock clock;
+    // 标识该日志是否为 Changelog（用于主键表的状态变更记录）。
     private final boolean isChangeLog;
-
+    // 高水位线。标识已提交且副本间同步完成的位点，消费者最高只能读到此处。
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
 
     /** The leader end offset snapshot when become leader. */
+    // 当该 Tablet 成为 Leader 时的日志末端位点快照。
     private volatile long leaderEndOffsetSnapshot = -1L;
 
     // The minimum offset that should be retained in the local log. This is used to ensure that,
     // the offset of kv snapshot should be retained, otherwise, kv recovery will fail.
+    // 最小保留位点。为了保证 KV 恢复，日志清理时不能删掉此位点之后的数据。
     private volatile long minRetainOffset;
     // tracking the log start offset in remote storage
+    // 追踪远程存储（如 S3/OSS）中日志的起始位点。
     private volatile long remoteLogStartOffset = Long.MAX_VALUE;
     // tracking the log end offset in remote storage
     private volatile long remoteLogEndOffset = -1L;
@@ -123,6 +137,7 @@ public final class LogTablet {
     // tracking the log start/end offset in lakehouse storage
     private volatile long lakeTableSnapshotId = -1;
     // note: currently, for primary key table, the log start offset nerve be updated
+    // 追踪湖仓存储（Lakehouse）中日志的起始位点。
     private volatile long lakeLogStartOffset = Long.MAX_VALUE;
     private volatile long lakeLogEndOffset = -1L;
     private volatile long lakeMaxTimestamp = -1;
@@ -180,18 +195,25 @@ public final class LogTablet {
     public String getPartitionName() {
         return physicalPath.getPartitionName();
     }
-
+    // 当客户端请求读取某个 Offset 的日志时，系统需要判断该 Offset 的数据是否已经迁移到了湖仓存储中（如 Apache Paimon 或 Iceberg 等底层格式），并且该存储是否允许当前类型的日志进行读取。
+    // 它是 Fluss 实现冷热数据分离读取的关键逻辑之一：如果数据在本地被删除了，系统会根据此方法的返回值决定是否去数据湖中拉取历史数据。
     public boolean canFetchFromLakeLog(long fetchOffset) {
         // currently, if is change log, we can't fetch log from lakehouse as
         // since currently, we don't support client read changelog directly
         // todo: should support to read from changelog directly, so that
         // we can read changelog directly
+        // isChangeLog 标识当前 Tablet 存储的是否为 Changelog（变更日志，通常用于主键表记录 Row 级别的增删改
+        // 目前 Fluss 的设计中，暂不支持客户端直接从数据湖中读取 Changelog 数据。
         if (isChangeLog) {
             return false;
         }
+        // lakeLogStartOffset (湖仓日志起始位点)
+        // lakeLogEndOffset (湖仓日志结束位点)
         return lakeLogStartOffset <= fetchOffset && fetchOffset < lakeLogEndOffset;
     }
-
+    // 用于判断是否可以从远程分层存储（Remote Tiered Storage）读取数据的逻辑。
+    // 在分层存储架构中，为了节省本地磁盘空间，旧的日志数据会被上传到对象存储（如 S3、OSS 等）。
+    // canFetchFromRemoteLog 方法的作用是：当客户端请求某个 Offset 的数据时，系统用它来判断该数据是否已经存储在远程分层存储中且处于可读取的有效范围内。
     public boolean canFetchFromRemoteLog(long fetchOffset) {
         return remoteLogStartOffset <= fetchOffset && fetchOffset < remoteLogEndOffset;
     }

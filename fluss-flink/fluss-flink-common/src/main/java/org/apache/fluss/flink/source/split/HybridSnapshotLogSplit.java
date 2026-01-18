@@ -30,10 +30,17 @@ import java.util.Objects;
  * <p>Only used for primary key table which will be of snapshot phase and incremental phase of
  * reading.
  */
+// Apache Fluss 实现“流批一体”和“CDC（数据变更捕获）全量增量一体化”读取的核心类。
+// 它继承自 SnapshotSplit，专门用于主键表（Primary Key Table）的数据消费。
+// HybridSnapshotLogSplit 的主要作用是管理从“存量快照”到“增量日志”的平滑切换过程。
+// 快照阶段（Snapshot Phase）：首先读取该分桶（Bucket）在某一时刻的全部存量数据。
+// 增量阶段（Incremental Phase）：快照读完后，自动切换到该时刻之后的 CDC 日志，继续消费增量变更。
 public class HybridSnapshotLogSplit extends SnapshotSplit {
 
     private static final String HYBRID_SPLIT_PREFIX = "hybrid-snapshot-log-";
+    // 记录当前分片是否已经完成了快照阶段的读取
     private final boolean isSnapshotFinished;
+    // 指定快照结束后，CDC 日志应该从哪一个逻辑偏移量（Offset）开始消费
     private final long logStartingOffset;
 
     public HybridSnapshotLogSplit(

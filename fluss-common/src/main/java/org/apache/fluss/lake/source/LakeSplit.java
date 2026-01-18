@@ -26,6 +26,8 @@ import java.util.List;
  *
  * @since 0.8
  */
+// LakeSplit 专门用于描述存储在外部数据湖（如存储在 HDFS/S3 上的 Parquet 或 ORC 文件）中的历史或存量数据分片
+// LakeSplit 定义了数据湖侧分片的逻辑位置与元数据规范。
 @PublicEvolving
 public interface LakeSplit {
 
@@ -37,6 +39,8 @@ public interface LakeSplit {
      *
      * @return the bucket id
      */
+    // 返回该数据分片所属的 Fluss 桶 ID (Bucket ID)
+    // 桶感知支持：在主键表或定义了 Bucket Key 的日志表中，数据是按桶分布的。为了让 Reader 能同时读取同一物理意义下的湖数据和实时日志，必须明确该分片属于哪个桶。
     int bucket();
 
     /**
@@ -54,5 +58,6 @@ public interface LakeSplit {
      * @return the resolved partition values specification, or {@code null} if this split doesn't
      *     belong to a specific partition in non-partitioned table.
      */
+    // 返回该分片所属的层级化分区值列表。
     List<String> partition();
 }

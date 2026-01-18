@@ -91,20 +91,27 @@ import static org.apache.fluss.utils.Preconditions.checkState;
  *       will be assigned to same reader.
  * </ul>
  */
+// FlinkSourceEnumerator 是 Source 算子的“大脑”。它运行在 Flink JobManager 端，负责协调数据读取任务的分发。
+// 分片发现与生成：它会周期性地扫描 Fluss 表，识别新的分区（Partitions）和桶（Buckets），并将它们转化为可处理的 Split（分片）。
+// 混合读取协调：在“湖仓一体”场景下，它负责协调从**数据湖（Lake）**读取历史数据和从 **Fluss 日志（Log）**读取实时增量数据。
+// 分片分配策略：负责将生成的分片分配给存活的 SourceReader。它保证了同一个 Bucket 的数据始终分配给同一个 Reader，从而确保数据的顺序性和一致性（尤其是对于主键表）。
+// 状态管理：保存已分配的分区和桶信息，支持 Flink 的 Checkpoint 机制，确保作业重启后能从上次的位置继续。
 @Internal
 public class FlinkSourceEnumerator
         implements SplitEnumerator<SourceSplitBase, SourceEnumeratorState> {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlinkSourceEnumerator.class);
-
+    // 内部线程池执行器，用于异步执行阻塞式的网络请求（如列出分区）
     private final WorkerExecutor workerExecutor;
+    // 目标表的路径（Database.Table）
     private final TablePath tablePath;
     private final boolean hasPrimaryKey;
     private final boolean isPartitioned;
+    // Fluss 客户端配置。
     private final Configuration flussConf;
-
+    // Flink 提供的枚举器上下文，用于获取 Reader 信息、分配分片、注册定时回调。
     private final SplitEnumeratorContext<SourceSplitBase> context;
-
+    // 暂存尚未成功分配给 Reader 的分片
     private final Map<Integer, List<SourceSplitBase>> pendingSplitAssignment;
 
     /**
@@ -119,21 +126,25 @@ public class FlinkSourceEnumerator
      * number of such lake-only partitions might exist during the initial startup, and they consume
      * minimal memory, this issue is being ignored for now.
      */
+    // 记录已分配的分区 ID 到名称的映射，用于处理分区删除事件。
     private final Map<Long, String> assignedPartitions;
 
     /** Buckets that have been assigned to readers. */
+    // 记录已经分配出去的桶（TableBucket），防止重复读取。
     private final Set<TableBucket> assignedTableBuckets;
-
+    // 专门用于存储待处理的“湖+日志”混合分片。
     @Nullable private List<SourceSplitBase> pendingHybridLakeFlussSplits;
-
+    // 分区自动发现的间隔。
     private final long scanPartitionDiscoveryIntervalMs;
-
+    // 标记是流模式还是批模式。
     private final boolean streaming;
+    // 定义读取开始的位置（如 Earliest, Latest, Timestamp 或 Snapshot）。
     private final OffsetsInitializer startingOffsetsInitializer;
     private final OffsetsInitializer stoppingOffsetsInitializer;
 
     // Lazily instantiated or mutable fields.
     private Connection connection;
+    // Fluss 管理端客户端，用于请求元数据（分区列表、Snapshot 信息）
     private Admin flussAdmin;
     private BucketOffsetsRetriever bucketOffsetsRetriever;
     private TableInfo tableInfo;
@@ -147,7 +158,7 @@ public class FlinkSourceEnumerator
     private volatile boolean closed = false;
 
     @Nullable private final Predicate partitionFilters;
-
+    // 如果开启了湖存储，该组件负责提供湖文件的分片逻辑。
     @Nullable private final LakeSource<LakeSplit> lakeSource;
 
     public FlinkSourceEnumerator(
@@ -244,15 +255,20 @@ public class FlinkSourceEnumerator
         this.lakeSource = lakeSource;
         this.workerExecutor = workerExecutor;
     }
-
+    // 方法是该组件的入口点，负责建立与 Fluss 的连接、拉取元数据并启动任务分发策略。
     @Override
     public void start() {
         // init admin client
+        // 1. 根据传入的配置创建 Fluss 物理连接
         connection = ConnectionFactory.createConnection(flussConf);
+        // 2. 获取 Admin 接口，用于后续查询表结构、分区、快照等元数据
         flussAdmin = connection.getAdmin();
+        // // 3. 实例化 BucketOffsetsRetriever，用于在生成分片时查询特定桶（Bucket）的 Offset
         bucketOffsetsRetriever = new BucketOffsetsRetrieverImpl(flussAdmin, tablePath);
         try {
+            // // 4. 发起同步阻塞/异步转同步请求，获取表的详细信息（如 Bucket 数量、配置等）
             tableInfo = flussAdmin.getTableInfo(tablePath).get();
+            // // 5. 从表配置中提取是否启用了“数据湖（Data Lake）”存储模式，这决定了是否需要读取湖文件
             lakeEnabled = tableInfo.getTableConfig().isDataLakeEnabled();
         } catch (Exception e) {
             throw new FlinkRuntimeException(
@@ -262,8 +278,11 @@ public class FlinkSourceEnumerator
 
         if (isPartitioned) {
             if (streaming) {
+                // --- 1.1 分区表 + 流模式 ---
                 if (lakeSource != null) {
                     // we'll need to consider lake splits
+                    // 如果定义了湖源，先尝试生成“混合分片（Hybrid Splits）”
+                    // 这种分片会先让 Reader 读取湖里的历史快照，再衔接流式日志
                     List<SourceSplitBase> hybridLakeFlussSplits = generateHybridLakeFlussSplits();
                     if (hybridLakeFlussSplits != null) {
                         LOG.info(
@@ -271,10 +290,11 @@ public class FlinkSourceEnumerator
                                 hybridLakeFlussSplits.size(),
                                 tablePath);
                         // handle hybrid lake fluss splits firstly
+                        // 立即将这些混合分片加入分配队列（第二个参数为 null 表示没有异常）
                         handleSplitsAdd(hybridLakeFlussSplits, null);
                     }
                 }
-
+                // --- 1.2 分区发现逻辑 ---
                 if (scanPartitionDiscoveryIntervalMs > 0) {
                     // should do partition discovery
                     LOG.info(
@@ -282,26 +302,31 @@ public class FlinkSourceEnumerator
                                     + "with new partition discovery interval of {} ms.",
                             tablePath,
                             scanPartitionDiscoveryIntervalMs);
+                    // 如果配置了发现间隔，启动定时异步任务
                     // discover new partitions and handle new partitions at fixed delay.
                     workerExecutor.callAsyncAtFixedDelay(
-                            this::listPartitions,
-                            this::checkPartitionChanges,
+                            this::listPartitions,// 生产者：获取当前分区列表
+                            this::checkPartitionChanges, // 消费者：对比并生成新分片
                             0,
                             scanPartitionDiscoveryIntervalMs);
                 } else {
                     // just call once
+                    // 只在启动时运行一次分区发现，后续不再监控新分区
                     LOG.info(
                             "Starting the FlussSourceEnumerator for table {} without partition discovery.",
                             tablePath);
                     workerExecutor.callAsync(this::listPartitions, this::checkPartitionChanges);
                 }
             } else {
+                // --- 1.3 分区表 + 批模式 ---
                 startInBatchMode();
             }
         } else {
+            // 非分区表逻辑
             if (streaming) {
                 startInStreamModeForNonPartitionedTable();
             } else {
+                // --- 2.2 非分区表 + 批模式 ---
                 startInBatchMode();
             }
         }
@@ -623,11 +648,15 @@ public class FlinkSourceEnumerator
     }
 
     /** Return the hybrid lake and fluss splits. Return null if no lake snapshot. */
+    // 核心任务是生成一种混合分片（Hybrid Split），让 Flink 任务能够先读取对象存储（数据湖）中的存量历史数据，再自动无缝切换到 Fluss 日志系统读取增量实时数据。
     @Nullable
     private List<SourceSplitBase> generateHybridLakeFlussSplits() {
         // still have pending lake fluss splits,
         // should be restored from checkpoint, shouldn't
         // list splits again
+        // 检查是否已经存在待处理的混合分片
+        // 如果不为 null，说明 enumerator 是从 Flink 的 Checkpoint 中恢复的
+        // 为了保证 Exactly-once 语义，不能重新生成分片，必须直接返回之前保存的状态
         if (pendingHybridLakeFlussSplits != null) {
             LOG.info("Still have pending lake fluss splits, shouldn't list splits again.");
             return pendingHybridLakeFlussSplits;
@@ -635,13 +664,17 @@ public class FlinkSourceEnumerator
         try {
             LakeSplitGenerator lakeSplitGenerator =
                     new LakeSplitGenerator(
-                            tableInfo,
-                            flussAdmin,
-                            lakeSource,
-                            bucketOffsetsRetriever,
-                            stoppingOffsetsInitializer,
-                            tableInfo.getNumBuckets(),
-                            this::listPartitions);
+                            tableInfo, // 表的元数据（包含 Schema、配置等）
+                            flussAdmin, // Fluss 管理客户端，用于获取服务端元数据
+                            lakeSource, // 具体的湖存储实现（如前面提到的 PaimonLakeSource）
+                            bucketOffsetsRetriever, //  用于查询 Fluss Log 中 Bucket 的偏移量工具
+                            stoppingOffsetsInitializer, // 停止位置初始化器（批模式有终点，流模式通常无终点）
+                            tableInfo.getNumBuckets(), // 表定义的桶数量
+                            this::listPartitions); // 函数式接口引用，用于在生成分片时获取当前的分区列表
+            // 调用生成器执行核心计算逻辑：
+            // 1. 扫描数据湖中的快照（Snapshot）
+            // 2. 找到快照对应的 Fluss Log 偏移量点
+            // 3. 构建混合分片对象
             List<SourceSplitBase> generatedSplits =
                     lakeSplitGenerator.generateHybridLakeFlussSplits();
             if (generatedSplits == null) {

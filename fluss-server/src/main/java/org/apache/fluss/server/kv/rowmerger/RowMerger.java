@@ -31,6 +31,7 @@ import javax.annotation.Nullable;
 import java.util.Optional;
 
 /** A merging interface defines how to merge a new row with existing row. */
+// 定义了在 主键表（Primary Key Table） 场景下，当新数据写入时，如何处理主键冲突（即新旧行合并）的核心逻辑。
 public interface RowMerger {
 
     /**

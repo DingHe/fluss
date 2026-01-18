@@ -28,6 +28,7 @@ import java.util.Map;
  *
  * <p>Package private and should be instantiated via {@link OffsetsInitializer}.
  */
+// LatestOffsetsInitializer 的主要作用是初始化消费位点至当前 Fluss 桶（Bucket）的最末尾。
 public class LatestOffsetsInitializer implements OffsetsInitializer {
     private static final long serialVersionUID = 3014700244733286989L;
 
@@ -36,6 +37,7 @@ public class LatestOffsetsInitializer implements OffsetsInitializer {
             @Nullable String partitionName,
             Collection<Integer> buckets,
             BucketOffsetsRetriever bucketOffsetsRetriever) {
+        // 告诉传入的 bucketOffsetsRetriever（位点提取助手）去执行“获取最新位点”的操作。
         return bucketOffsetsRetriever.latestOffsets(partitionName, buckets);
     }
 }

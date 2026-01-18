@@ -27,6 +27,7 @@ import org.apache.fluss.row.indexed.IndexedRow;
  * The format of the log records in log store. The supported formats are 'arrow', 'indexed' and
  * 'compacted'.
  */
+// LogFormat 定义了 Fluss 日志记录（Log Records）的序列化与组织方式。
 public enum LogFormat {
 
     /**
@@ -36,6 +37,7 @@ public enum LogFormat {
      *
      * @see MemoryLogRecordsArrowBuilder
      */
+    // 物理结构：基于 Apache Arrow 的列式存储格式（Columnar-oriented）。
     ARROW,
 
     /**
@@ -46,6 +48,7 @@ public enum LogFormat {
      *
      * @see MemoryLogRecordsIndexedBuilder
      */
+    // 物理结构：基于 IndexedRow 的行式存储格式（Row-oriented）。
     INDEXED,
 
     /**
@@ -55,6 +58,7 @@ public enum LogFormat {
      *
      * @see MemoryLogRecordsCompactedBuilder
      */
+    // 主键表优化：专门为带有**主键（Primary Key）**的表设计。它会根据主键进行“折叠（Compaction）”，只保留最新状态。
     COMPACTED;
 
     /**

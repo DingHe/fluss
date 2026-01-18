@@ -63,6 +63,16 @@ import static org.apache.fluss.utils.IOUtils.closeQuietly;
  * <p>A segment with a base offset of [base_offset] would be stored in two files, a
  * [base_offset].index and a [base_offset].log file.
  */
+// LogSegment 代表了磁盘上的一段日志分段。为了防止单个日志文件无限增大，Fluss 将一个完整的 Log 拆分成多个 Segment。
+// 每个 LogSegment 由以下三部分组成：
+// 数据文件 (.log): 实际存储消息（Records）的二进制文件。
+// 偏移量索引文件 (.index): 一个映射表，帮助系统根据逻辑偏移量（Offset）快速找到数据在物理文件中的位置。
+// 时间戳索引文件 (.timeindex): 允许根据时间戳查找对应的偏移量。
+// 主要职责是：
+// 读写调度：作为数据的入口和出口，管理数据的追加（Append）和读取（Read）。
+// 索引维护：在写入数据时，根据配置的步长（Interval）自动更新索引文件。
+// 数据恢复与截断：在服务宕机后恢复数据的一致性，或者根据需求截断过期/无效数据。
+// 生命周期管理：处理文件的滚动（Rolling）、刷新（Flush）和删除。
 @NotThreadSafe
 @Internal
 public final class LogSegment {
@@ -70,26 +80,33 @@ public final class LogSegment {
     private static final Logger LOG = LoggerFactory.getLogger(LogSegment.class);
 
     // the log format of the log segment
+    // 标识日志格式（如 ARROW 或原生格式），影响读取时的投影（Projection）支持。
     private final LogFormat logFormat;
 
     // The file records containing log entries.
+    // 直接操作磁盘上的 .log 文件，负责数据的物理读写。
     private final FileLogRecords fileLogRecords;
 
     // The offset indexes.
+    // 偏移量索引的延迟加载包装类。提高打开大量 Segment 时的速度。
     private final LazyIndex<OffsetIndex> lazyOffsetIndex;
 
     // The time indexes.
+    // 时间戳索引的延迟加载包装类。
     private final LazyIndex<TimeIndex> lazyTimeIndex;
 
     // A lower bound on the offsets in this segment.
+    // 该段的起始偏移量。文件名通常由该值命名（如 00000000000000000123.log）。
     private final long baseOffset;
 
     // The approximate number of bytes between entries in the index.
+    // 索引插入密度。每写入这么多字节的数据，就向索引文件中增加一条记录。
     private final int indexIntervalBytes;
-
+    // 计数器。记录自上次插入索引以来新写的字节数。
     private int bytesSinceLastIndexEntry = 0;
 
     // The maximum timestamp and start offset we see so far
+    // 缓存当前段内已知的最大时间戳及其对应的偏移量，用于加速查询和清理逻辑。
     private volatile TimestampOffset maxTimestampAndStartOffsetSoFar = TimestampOffset.UNKNOWN;
 
     public LogSegment(
@@ -118,42 +135,47 @@ public final class LogSegment {
     public long getBaseOffset() {
         return baseOffset;
     }
-
+    // 主要负责从配置中读取参数，并为后续更底层的打开逻辑做准备。
+    // File dir: 日志段文件存放的父目录。
+    // long baseOffset: 该段的起始偏移量（Base Offset），也是文件名命名的依据。
+    // LogFormat logFormat: 数据的存储格式（例如 Arrow 格式或普通格式）。
     public static LogSegment open(
             File dir, long baseOffset, Configuration logConfig, LogFormat logFormat)
             throws IOException {
 
         int initFileSize = 0;
+        // 如果配置开启了“预分配”功能，系统会立即将 initFileSize 设置为配置中指定的单个日志段最大字节数（通常是 1GB 或更大）
         if (logConfig.getBoolean(ConfigOptions.LOG_FILE_PREALLOCATE)) {
             initFileSize = (int) logConfig.get(ConfigOptions.LOG_SEGMENT_FILE_SIZE).getBytes();
         }
 
         return open(dir, baseOffset, logConfig, false, initFileSize, logFormat);
     }
-
+    // 负责真正地打开或创建磁盘上的 .log 文件以及与之配套的索引文件。
     public static LogSegment open(
-            File dir,
-            long baseOffset,
-            Configuration logConfig,
-            boolean fileAlreadyExists,
-            int initFileSize,
+            File dir,  // 日志段所在的父目录
+            long baseOffset,  // 该日志段的起始偏移量（用于文件名）
+            Configuration logConfig,  // 全局或表级配置对象
+            boolean fileAlreadyExists,  // 布尔值：文件是否已经存在（影响打开模式）
+            int initFileSize,  // 初始文件大小（用于预分配）
             LogFormat logFormat)
             throws IOException {
+        // 从配置中读取索引文件（.index 和 .timeindex）允许达到的最大字节数（默认通常是 10MB）。
         int maxIndexSize = (int) logConfig.get(ConfigOptions.LOG_INDEX_FILE_SIZE).getBytes();
 
         return new LogSegment(
                 logFormat,
                 FileLogRecords.open(
-                        FlussPaths.logFile(dir, baseOffset),
+                        FlussPaths.logFile(dir, baseOffset),  // 使用 baseOffset 生成 .log 文件路径
                         fileAlreadyExists,
                         initFileSize,
-                        logConfig.getBoolean(ConfigOptions.LOG_FILE_PREALLOCATE)),
+                        logConfig.getBoolean(ConfigOptions.LOG_FILE_PREALLOCATE)), // 是否执行预分配
                 LazyIndex.forOffset(
-                        FlussPaths.offsetIndexFile(dir, baseOffset), baseOffset, maxIndexSize),
+                        FlussPaths.offsetIndexFile(dir, baseOffset), baseOffset, maxIndexSize),  // 生成 .index 文件路径
                 LazyIndex.forTime(
-                        FlussPaths.timeIndexFile(dir, baseOffset), baseOffset, maxIndexSize),
+                        FlussPaths.timeIndexFile(dir, baseOffset), baseOffset, maxIndexSize), // 生成 .timeindex 文件路径
                 baseOffset,
-                (int) logConfig.get(ConfigOptions.LOG_INDEX_INTERVAL_SIZE).getBytes());
+                (int) logConfig.get(ConfigOptions.LOG_INDEX_INTERVAL_SIZE).getBytes()); /// 决定了索引的“稀疏程度”。例如，设置为 4KB，则表示数据文件每写入 4KB 字节，才会在 .index 文件中记录一条位置映射。这在查询性能和索引文件大小之间做了平衡。
     }
 
     public OffsetIndex offsetIndex() throws IOException {

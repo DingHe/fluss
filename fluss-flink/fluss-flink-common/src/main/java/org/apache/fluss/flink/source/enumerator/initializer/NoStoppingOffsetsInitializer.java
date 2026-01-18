@@ -30,6 +30,7 @@ import static org.apache.fluss.flink.source.split.LogSplit.NO_STOPPING_OFFSET;
  *
  * <p>This class is used as the default stopping offsets initializer for unbounded Fluss sources.
  */
+// NoStoppingOffsetsInitializer 的主要作用是定义一个没有终点的消费边界。
 public class NoStoppingOffsetsInitializer implements OffsetsInitializer {
 
     private static final long serialVersionUID = 1L;

@@ -54,17 +54,30 @@ import static org.apache.fluss.record.LogRecordBatchFormat.LENGTH_LENGTH;
  *
  * @since 0.1
  */
+// Apache Fluss 中用于处理**索引格式（Indexed Format）**日志记录的核心类。
+// 它实现了 LogRecord 接口，主要用于以一种内存友好且可以直接持久化的二进制格式来表示单条记录。
+// IndexedLogRecord 并不持有解压后的 Java 对象，而是直接指向内存段（MemorySegment）中的二进制数据，从而实现极高的读写效率
+// IndexedLogRecord 的作用可以概括为：高性能的二进制日志记录访问器。
+// 紧凑存储：定义了日志记录在磁盘/内存中的物理布局：
+// Length (4字节)：记录的总长度
+// Attributes (1字节)：包含记录的元数据，如 ChangeType（变更类型）。
+// Value (变长)：实际的行数据（IndexedRow）。
+
 @PublicEvolving
 public class IndexedLogRecord implements LogRecord {
-
+    // 固定为 1 字节，用于存储属性信息。
     private static final int ATTRIBUTES_LENGTH = 1;
-
+    // 记录该行在日志流中的绝对位点。
     private final long logOffset;
+    // 记录该行的时间戳。
     private final long timestamp;
+    // 该行的字段类型定义数组（DataType[]），用于在反序列化 getRow() 时告知系统如何解析二进制数据。
     private final DataType[] fieldTypes;
-
+    // 指向包含实际二进制数据的 MemorySegment（Fluss 封装的内存缓冲区）
     private MemorySegment segment;
+    // 该条记录在 segment 中的起始偏移位置
     private int offset;
+    // 整条记录的物理大小（包含长度字段本身）
     private int sizeInBytes;
 
     IndexedLogRecord(long logOffset, long timestamp, DataType[] fieldTypes) {
@@ -131,6 +144,7 @@ public class IndexedLogRecord implements LogRecord {
     }
 
     /** Write the record to input `target` and return its size. */
+    // 将一条 IndexedRow 写入输出流。它先写长度，再写属性字节，最后序列化行内容。
     public static int writeTo(OutputView outputView, ChangeType changeType, IndexedRow row)
             throws IOException {
         int sizeInBytes = calculateSizeInBytes(row);
@@ -147,7 +161,7 @@ public class IndexedLogRecord implements LogRecord {
 
         return sizeInBytes + LENGTH_LENGTH;
     }
-
+    // 从内存段的指定位置读取并构造一个 IndexedLogRecord 对象。
     public static IndexedLogRecord readFrom(
             MemorySegment segment,
             int position,
@@ -159,7 +173,7 @@ public class IndexedLogRecord implements LogRecord {
         logRecord.pointTo(segment, position, sizeInBytes + LENGTH_LENGTH);
         return logRecord;
     }
-
+    // 预估将一行数据转换为 IndexedLogRecord 格式后所需的总字节数。
     public static int sizeOf(BinaryRow row) {
         int sizeInBytes = calculateSizeInBytes(row);
         return sizeInBytes + LENGTH_LENGTH;

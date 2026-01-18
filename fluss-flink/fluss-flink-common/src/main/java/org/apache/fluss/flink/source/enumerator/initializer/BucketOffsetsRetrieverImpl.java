@@ -36,8 +36,11 @@ import java.util.concurrent.ExecutionException;
 import static org.apache.fluss.client.table.scanner.log.LogScanner.EARLIEST_OFFSET;
 
 /** The default implementation for offsets retriever. */
+// 该类的主要作用是充当 Flink 与 Fluss 集群之间的桥梁，负责从服务端查询真实的物理偏移量（Offsets）。
 public class BucketOffsetsRetrieverImpl implements BucketOffsetsRetriever {
+    // Fluss 的管理客户端。它是执行远程调用（RPC）的核心工具，用于向 Fluss 集群发送 ListOffsets 请求。
     private final Admin flussAdmin;
+    // 当前正在读取的表的路径（包含数据库名和表名）。它决定了 RPC 请求的目标资源。
     private final TablePath tablePath;
 
     public BucketOffsetsRetrieverImpl(Admin flussAdmin, TablePath tablePath) {

@@ -25,6 +25,8 @@ import org.apache.fluss.annotation.PublicEvolving;
  *
  * @since 0.1
  */
+// 定义了以**日志（Log）**格式存储数据的基本访问规范。在 Fluss 这种流式存储系统中，日志数据并不是一条条独立存储的，而是以“批次”为单位组织的。
+// 流式日志记录的抽象容器
 @PublicEvolving
 public interface LogRecords {
     /**
@@ -32,6 +34,7 @@ public interface LogRecords {
      *
      * @return The size in bytes of the records
      */
+    // 获取这组日志记录所占用的物理字节大小
     int sizeInBytes();
 
     /**
@@ -40,5 +43,6 @@ public interface LogRecords {
      *
      * @return An iterator over the record batches of the log
      */
+    // 获取日志记录中所有**记录批次（Record Batches）**的迭代器。
     Iterable<LogRecordBatch> batches();
 }

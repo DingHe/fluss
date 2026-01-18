@@ -54,21 +54,37 @@ import static org.apache.fluss.config.ConfigOptions.CLIENT_SCANNER_IO_TMP_DIR;
 import static org.apache.fluss.flink.utils.FlinkConnectorOptionsUtils.getClientScannerIoTmpDir;
 
 /** Flink source for Fluss. */
+// 主要作用是连接 Flink 运行时环境与 Fluss 存储集群
+// 配置持有者：保存读取 Fluss 表所需的所有元数据（如表路径、字段投影、分区过滤等）。
+// 组件工厂：负责在 Flink 任务启动时创建 SplitEnumerator（用于发现和分配分片）和 SourceReader（用于实际读取数据）。
+// 行为定义：定义数据源是流式的还是批次的，并提供序列化工具以支持 Flink 的状态快照（Checkpoint）和恢复。
+// 类型映射：将 Fluss 的数据类型（RowType）转换为 Flink 的类型系统（TypeInformation）。
 public class FlinkSource<OUT>
         implements Source<OUT, SourceSplitBase, SourceEnumeratorState>, ResultTypeQueryable {
     private static final long serialVersionUID = 1L;
-
+    // 存储 Fluss 客户端的相关配置（如服务器地址、超时时间等）。
     private final Configuration flussConf;
+    // 标识要读取的 Fluss 表的完整路径（数据库名.表名）。
     private final TablePath tablePath;
+    // 标识目标表是否有主键。这决定了是否需要使用 HybridSnapshotLogSplit。
     private final boolean hasPrimaryKey;
+    // 标识目标表是否为分区表
     private final boolean isPartitioned;
+    // Fluss 层的原始输出行类型，定义了数据的 Schema。
     private final RowType sourceOutputType;
+    // 字段投影索引。如果只查询部分列，这里记录了需要读取的列索引。
     @Nullable private final int[] projectedFields;
+    // 定义起始消费位置（例如：从最早位置、最新位置或特定时间戳开始）。
     protected final OffsetsInitializer offsetsInitializer;
+    // 自动发现新分区的间隔时间。
     protected final long scanPartitionDiscoveryIntervalMs;
+    // 标识是流模式（持续读取）还是批模式（读完快照即结束）。
     private final boolean streaming;
+    // 反序列化器，负责将 Fluss 的二进制记录转换为 Flink 的输出对象类型 OUT。
     private final FlussDeserializationSchema<OUT> deserializationSchema;
+    // 分区过滤谓词，用于在源头进行分区裁剪，减少不必要的数据扫描。
     @Nullable private final Predicate partitionFilters;
+    // 湖仓一体支持。如果涉及读取湖底层的存量数据，该对象提供湖分片的获取逻辑。
     @Nullable private final LakeSource<LakeSplit> lakeSource;
 
     public FlinkSource(

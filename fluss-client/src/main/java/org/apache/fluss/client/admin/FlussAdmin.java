@@ -387,14 +387,16 @@ public class FlussAdmin implements Admin {
                 .getKvSnapshotMetadata(request)
                 .thenApply(ClientRpcMessageUtils::toKvSnapshotMetadata);
     }
-
+    // 通过 RPC（远程过程调用） 从 Fluss 集群的元数据中心获取指定表的最新的“湖快照”信息。
+    // 接收 TablePath（包含数据库名和表名）作为参数。
     @Override
     public CompletableFuture<LakeSnapshot> getLatestLakeSnapshot(TablePath tablePath) {
+        // 创建一个 RPC 请求协议对象 GetLatestLakeSnapshotRequest
         GetLatestLakeSnapshotRequest request = new GetLatestLakeSnapshotRequest();
         request.setTablePath()
                 .setDatabaseName(tablePath.getDatabaseName())
                 .setTableName(tablePath.getTableName());
-
+        // 负责将 RPC 层返回的、用于传输的 原始消息对象 转换为应用层更易使用的 LakeSnapshot 业务对象。
         return readOnlyGateway
                 .getLatestLakeSnapshot(request)
                 .thenApply(ClientRpcMessageUtils::toLakeTableSnapshotInfo);

@@ -109,6 +109,10 @@
             <version>${iceberg.version}</version>
             <scope>test</scope>
         </dependency>
+      <dependency>
+        <groupId>org.apache.fluss</groupId>
+        <artifactId>fluss-shaded-arrow</artifactId>
+      </dependency>
     </dependencies>
 
     <build>

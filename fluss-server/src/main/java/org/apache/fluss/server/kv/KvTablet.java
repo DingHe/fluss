@@ -90,45 +90,63 @@ import static org.apache.fluss.utils.concurrent.LockUtils.inReadLock;
 import static org.apache.fluss.utils.concurrent.LockUtils.inWriteLock;
 
 /** A kv tablet which presents a unified view of kv storage. */
+// KvTablet 是负责管理单个分桶（Bucket）内键值存储（KV Storage）的核心组件。
+// 它将底层的 RocksDB 存储与 Fluss 的预写日志（Log）机制结合，提供了一个统一的、强一致性的 KV 视图。
+// 统一视图层：它封装了底层的 RocksDB 存储，对上层提供简单的 put、get、prefixLookup 等操作。
+// 写路径协调：当作为 Leader 接收写入时，它负责将数据写入 预写缓冲区（Pre-write Buffer），同时生成 WAL（变更日志） 发送给关联的 LogTablet。这确保了 KV 状态与 Log 状态的原子性。
+// Schema 演进与合并：它处理不同 Schema 版本之间的数据兼容性，并利用 RowMerger 处理主键冲突时的更新逻辑（如部分更新或整行覆盖）。
 @ThreadSafe
 public final class KvTablet {
     private static final Logger LOG = LoggerFactory.getLogger(KvTablet.class);
-
+    // 物理表路径，包含数据库名、表名、分区名等。
     private final PhysicalTablePath physicalPath;
+    // 该 Tablet 所属的分桶信息（Table ID + Bucket ID）
     private final TableBucket tableBucket;
-
+    // 与此 KV Tablet 绑定的日志组件，负责存储 CDC（数据变更）日志。
     private final LogTablet logTablet;
+    // 提供 Arrow 格式的写入器。
     private final ArrowWriterProvider arrowWriterProvider;
+    // 内存段池，用于管理 WAL 构建过程中的内存分配。
     private final MemorySegmentPool memorySegmentPool;
-
+    // 该分桶在磁盘上的物理存储目录。
     private final File kvTabletDir;
+    // 批量写入 RocksDB 的大小阈值。
     private final long writeBatchSize;
+    // 封装了真正的 RocksDB 实例，负责数据的持久化存储。
     private final RocksDBKv rocksDBKv;
+    // 预写缓冲区。数据先写到这里，等 Log 成功持久化后，再批量刷新到 RocksDB，减少磁盘 I/O。
     private final KvPreWriteBuffer kvPreWriteBuffer;
     private final TabletServerMetricGroup serverMetricGroup;
 
     // A lock that guards all modifications to the kv.
+    // 写锁，保证对 Tablet 修改时的线程安全。
     private final ReadWriteLock kvLock = new ReentrantReadWriteLock();
+    // 日志格式（如 Arrow、Compacted、Indexed）。
     private final LogFormat logFormat;
+    // KV 存储格式（如 Compacted）。
     private final KvFormat kvFormat;
     // defines how to merge rows on the same primary key
+    // 定义了当两条记录主键相同时的“合并规则”（如覆盖、增量合并）。
     private final RowMerger rowMerger;
     private final ArrowCompressionInfo arrowCompressionInfo;
-
+    // 用于获取表的最新的 Schema 信息。
     private final SchemaGetter schemaGetter;
 
     // the changelog image mode for this tablet
+    // 变更日志镜像模式（WAL 或全量镜像），决定了生成的 CDC 日志包含哪些内容（如是否包含旧值）。
     private final ChangelogImage changelogImage;
 
     // RocksDB statistics accessor for this tablet
+    // 统计信息访问器，用于监控 RocksDB 的性能指标。
     @Nullable private final RocksDBStatistics rocksDBStatistics;
 
     /**
      * The kv data in pre-write buffer whose log offset is less than the flushedLogOffset has been
      * flushed into kv.
      */
+    // 已刷新位点。表示 Log 位点小于此值的数据都已经安全地从缓冲区刷入了 RocksDB。
     private volatile long flushedLogOffset = 0;
-
+    // 标记当前 Tablet 是否已关闭。
     @GuardedBy("kvLock")
     private volatile boolean isClosed = false;
 
@@ -216,11 +234,13 @@ public final class KvTablet {
                 changelogImage,
                 rocksDBStatistics);
     }
-
+    // 核心职责是配置并初始化底层的 RocksDB 存储引擎。
+    // 它通过组合配置信息、磁盘路径和资源限流器，最终产出一个可用的 RocksDBKv 实例
     private static RocksDBKv buildRocksDBKv(
             Configuration configuration, File kvDir, RateLimiter sharedRateLimiter)
             throws IOException {
         // Enable statistics to support RocksDB statistics collection
+        // 初始化 RocksDB 的资源管理器，用于统一管理内存、配置和本地库资源。
         RocksDBResourceContainer rocksDBResourceContainer =
                 new RocksDBResourceContainer(configuration, kvDir, true, sharedRateLimiter);
         RocksDBKvBuilder rocksDBKvBuilder =
@@ -286,34 +306,43 @@ public final class KvTablet {
      * @param kvRecords the kv records to put into
      * @param targetColumns the target columns to put, null if put all columns
      */
+    // KvTablet 中最复杂且最重要的写操作方法。
+    // 它负责接收客户端的 KV 数据包，执行合并逻辑，并协调 KV 存储与 CDC Log（变更日志） 的同步
     public LogAppendInfo putAsLeader(KvRecordBatch kvRecords, @Nullable int[] targetColumns)
             throws Exception {
         return inWriteLock(
                 kvLock,
                 () -> {
+                    // 检查底层的 RocksDB 是否由于错误或关闭而不可用。
                     rocksDBKv.checkIfRocksDBClosed();
-
+                    // 获取系统当前最新的 Schema（表结构）信息。
                     SchemaInfo schemaInfo = schemaGetter.getLatestSchemaInfo();
                     Schema latestSchema = schemaInfo.getSchema();
                     short latestSchemaId = (short) schemaInfo.getSchemaId();
                     validateSchemaId(kvRecords.schemaId(), latestSchemaId);
 
                     // we only support ADD COLUMN, so targetColumns is fine to be used directly
+                    // 根据当前请求涉及的列（targetColumns）配置合并引擎。如果请求只更新部分列，合并器会负责处理“读-改-写”过程。
                     RowMerger currentMerger =
                             rowMerger.configureTargetColumns(
                                     targetColumns, latestSchemaId, latestSchema);
 
                     RowType latestRowType = latestSchema.getRowType();
+                    // 负责将 KV 的变更转化为日志流（通常是 Arrow 格式）
                     WalBuilder walBuilder = createWalBuilder(latestSchemaId, latestRowType);
+                    // 记录客户端的 Writer ID 和序列号，用于幂等性检查（去重）
                     walBuilder.setWriterState(kvRecords.writerId(), kvRecords.batchSequence());
                     // we only support ADD COLUMN LAST, so the BinaryRow after RowMerger is
                     // only has fewer ending columns than latest schema, so we pad nulls to
                     // the end of the BinaryRow to get the latest schema row.
+                    // 因为只支持在末尾加列，如果输入的行比较旧，这个工具类会自动在末尾补 null 以对齐最新的 Schema。
                     PaddingRow latestSchemaRow = new PaddingRow(latestRowType.getFieldCount());
                     // get offset to track the offset corresponded to the kv record
+                    // 记录当前日志末尾的位点（Offset）。如果本次写入失败或重复，需要通过这个位点回滚 KV 缓冲区。
                     long logEndOffsetOfPrevBatch = logTablet.localLogEndOffset();
 
                     try {
+                        // 处理 KV 记录 (核心逻辑)
                         processKvRecords(
                                 kvRecords,
                                 kvRecords.schemaId(),
@@ -332,11 +361,14 @@ public final class KvTablet {
                         // put a batch into file with recordCount 0 and offset plus 1L, it will
                         // update the batchSequence corresponding to the writerId and also increment
                         // the CDC log offset by 1.
+                        // 将生成的变更日志正式写入磁盘。
                         LogAppendInfo logAppendInfo = logTablet.appendAsLeader(walBuilder.build());
 
                         // if the batch is duplicated, we should truncate the kvPreWriteBuffer
                         // already written.
+                        // 如果底层发现这是一个重复提交的请求（Sequence ID 已存在）
                         if (logAppendInfo.duplicated()) {
+                            // 因为刚才 processKvRecords 已经把数据写进 KV 缓冲区了，如果是重复请求，必须把刚才写进缓冲区的东西删掉（回滚），防止数据污染。
                             kvPreWriteBuffer.truncateTo(
                                     logEndOffsetOfPrevBatch, TruncateReason.DUPLICATED);
                         }

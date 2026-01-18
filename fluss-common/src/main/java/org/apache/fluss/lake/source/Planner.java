@@ -32,6 +32,12 @@ import java.util.List;
  * @param <Split> the type of data split this planner generates, must extend {@link LakeSplit}
  * @since 0.8
  */
+// Planner 接口定义了如何将存储在数据湖中的庞大数据集“切分”成可并行处理任务的标准。
+// 数据读取任务的拆解者
+// 在分布式计算中，面对数据湖（如存储在 S3 或 HDFS 上的 Parquet/Avro 文件）中数以万计的文件，单个节点无法高效处理。Planner 的职责就是：
+// 扫描元数据：根据 LakeSource 提供的快照 ID（Snapshot ID），扫描数据湖中对应的文件列表。
+// 任务切分：将海量文件逻辑上划分为多个 Split（分片）。每个 Split 通常代表一个文件的一部分或多个小文件的组合。
+//
 @PublicEvolving
 public interface Planner<Split extends LakeSplit> {
 
@@ -41,5 +47,6 @@ public interface Planner<Split extends LakeSplit> {
      * @return the list of readable data splits
      * @throws IOException if an I/O error occurs
      */
+    // 执行实际的切分规划逻辑，生成一组可读取的数据分片。
     List<Split> plan() throws IOException;
 }

@@ -63,27 +63,44 @@ import static org.apache.fluss.utils.FileUtils.flushDirIfExists;
  * <p>NOTE: this class is not thread-safe, and it relies on the thread safety provided by the Log
  * class.
  */
+// LocalLog 类是该存储系统的核心组件之一。它深受 Apache Kafka 设计的影响，主要用于管理存储在本地磁盘上的追加日志（Append-only Log）
+// LocalLog 是对一个表存储桶（Table Bucket）本地日志文件的逻辑封装。它的主要作用包括：
+// 多段管理：将一个巨大的日志文件拆分成多个较小的 LogSegment（日志段），每个段包含数据文件（.log）和索引文件（.index）。
+// 顺序写入与随机读取：提供在活跃段（Active Segment）末尾追加消息的能力，并支持根据 Offset（偏移量）或 Timestamp（时间戳）快速定位并读取数据。
+// 持久化控制：管理数据的刷盘（Flush）逻辑，维护 recoveryPoint（恢复点）以确保异常宕机后的数据一致性。
+// 生命周期管理：负责日志段的滚动（Roll，当文件过大时切换新文件）、截断（Truncation，删除非法或冗余数据）以及物理删除。
 @NotThreadSafe
 public final class LocalLog {
     private static final Logger LOG = LoggerFactory.getLogger(LocalLog.class);
-
+    // 常量，表示未知的偏移量（-1）。
     public static final long UNKNOWN_OFFSET = -1L;
 
     private final Configuration config;
+    // 管理该 Log 下所有 LogSegment 的集合，支持按 Offset 检索。
     private final LogSegments segments;
+    // 标识该日志属于哪个表和哪个桶。
     private final TableBucket tableBucket;
+    // 定义日志消息的存储格式版本。
     private final LogFormat logFormat;
     // Last time the log was flushed
+    // 记录上一次执行刷盘（Flush）操作的时间戳。
     private final AtomicLong lastFlushedTime;
 
     private final Counter flushCount;
+    // 度量指标：统计刷盘操作的耗时分布。
     private final Histogram flushLatencyHistogram;
-
+    // 该日志所在的本地磁盘目录路径。
     private volatile File logTabletDir;
+    // 恢复点。Offset 小于此值的数据被认为已安全刷入磁盘。
     private volatile long recoveryPoint;
+    // 当前本地日志中最小的有效 Offset。
     private volatile long localLogStartOffset;
+    // 当前本地日志中所有记录的最大时间戳。
     private volatile long localMaxTimestamp;
+    // 下一条消息的元数据。
+    // 包含即将写入的 Offset 及其在段中的物理位置。
     private volatile LogOffsetMetadata nextOffsetMetadata;
+    // 标记位，指示索引文件的内存映射（mmap）是否已关闭。
     private volatile boolean isMemoryMappedBufferClosed = false;
 
     public LocalLog(

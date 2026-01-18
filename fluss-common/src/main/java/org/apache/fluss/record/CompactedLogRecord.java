@@ -55,6 +55,11 @@ import static org.apache.fluss.record.LogRecordBatchFormat.LENGTH_LENGTH;
  *
  * @since 0.8
  */
+// 专门用于处理以 Compacted（紧凑）格式 编码的行数据。
+// CompactedLogRecord 的核心作用是实现 “空间换 CPU” 的存储优化方案。
+// 极致的空间利用率：它内部承载的是 CompactedRow。与 IndexedLogRecord 不同，它不保证字段的随机访问，而是采用变长整数（VLQ）和更紧凑的 Null 值掩码来减小每行数据的体积。
+// 适合冷数据或长周期存储：由于数据高度压缩，读取单个字段需要部分解码，因此它非常适合对存储空间敏感、但对单条数据字段随机读取频率要求稍低的场景。
+// 物理格式统一：尽管 payload（有效负载）编码不同，但它保留了与 Fluss 其它日志记录一致的 Header（长度 + 属性），使得统一的日志扫描器（LogScanner）可以无缝处理混合格式。
 @PublicEvolving
 public class CompactedLogRecord implements LogRecord {
 

@@ -36,16 +36,23 @@ import java.util.Objects;
  *
  * @since 0.1
  */
+// 分布式流式存储系统中，它扮演着“逻辑寻址标签”的角色。
+// TableBucket 的主要作用是唯一标识 Fluss 集群中的一个数据分桶（Bucket）。
+// Table（表） 是数据的逻辑集合。
+// Partition（分区） 是可选的逻辑层（例如按天分区）。
+// Bucket（分桶） 是物理存储和并行读写的最小单位。
+// TableBucket 整合了表 ID、分区 ID 和桶索引，成为了 Fluss 内部在进行数据分发（Produce）、任务调度（Assignment）以及元数据管理时的通用键（Key）。
 @PublicEvolving
 public class TableBucket implements Serializable {
 
     private static final long serialVersionUID = 1L;
-
+    // 所属表的唯一标识符（ID）
     private final long tableId;
-
+    // 桶的索引编号。
     private final int bucket;
 
     // will be null if the bucket doesn't belong to a partition
+    // 所属分区的唯一标识符（ID）
     private final @Nullable Long partitionId;
 
     // Cache hashCode as it is called in performance sensitive parts of the code (e.g.

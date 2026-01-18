@@ -54,6 +54,10 @@ import org.apache.fluss.rpc.protocol.RPC;
 import java.util.concurrent.CompletableFuture;
 
 /** The gateway interface between the client and the server for the read-only metadata access. */
+// AdminReadOnlyGateway 是 Apache Fluss RPC 架构中专门负责只读元数据访问的网关接口。
+// 它继承自 RpcGateway，定义了客户端（如 Flink 作业、管理工具）向服务器查询系统状态和表结构时必须遵守的协议。
+// 元数据检索：允许客户端获取数据库、表、分区、Schema 等静态配置信息。
+// 状态发现：提供查询最新快照（KV 快照或数据湖快照）和集群配置的能力。
 public interface AdminReadOnlyGateway extends RpcGateway {
 
     // ------ databases ------
@@ -63,6 +67,7 @@ public interface AdminReadOnlyGateway extends RpcGateway {
      *
      * @return a list of the names of all databases
      */
+    // 获取当前 Catalog 中所有数据库的名称列表。
     @RPC(api = ApiKeys.LIST_DATABASES)
     CompletableFuture<ListDatabasesResponse> listDatabases(ListDatabasesRequest request);
 
@@ -72,6 +77,7 @@ public interface AdminReadOnlyGateway extends RpcGateway {
      * @param request Name of the database
      * @return The response of requested database.
      */
+    // 获取指定数据库的详细信息（如属性、描述等）。
     @RPC(api = ApiKeys.GET_DATABASE_INFO)
     CompletableFuture<GetDatabaseInfoResponse> getDatabaseInfo(GetDatabaseInfoRequest request);
 
@@ -81,6 +87,7 @@ public interface AdminReadOnlyGateway extends RpcGateway {
      * @param request Database exists request
      * @return a future with true if the given database exists in the catalog false otherwise
      */
+    // 快速检查指定的数据库是否存在。
     @RPC(api = ApiKeys.DATABASE_EXISTS)
     CompletableFuture<DatabaseExistsResponse> databaseExists(DatabaseExistsRequest request);
 

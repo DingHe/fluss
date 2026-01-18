@@ -50,11 +50,19 @@ import java.util.regex.Pattern;
  * ----- checkpoint file end  ------
  * </pre>
  */
+// 借鉴了 Apache Kafka 的设计，主要负责将内存中各个分桶（Bucket）的**位点（Offsets）**信息持久化到物理磁盘文件中。
+// 在分布式存储系统中，位点信息（如 High Watermark, Recovery Point 等）至关重要。该类的核心作用是：
+// 持久化存储：将 TableBucket -> Offset 的映射关系以文本形式保存到文件中。
+// 故障恢复：当 Tablet Server 重启时，系统可以通过读取该文件，快速恢复各个分桶的消费或同步进度，而不需要重新扫描所有日志。
+// 版本管理：支持文件格式的版本化（当前为版本 0），便于未来升级扩展。
 @Internal
 public final class OffsetCheckpointFile {
+    // 正规表达式 \s+，用于在解析文件内容时识别一个或多个空格，以此拆分每一行的字段。
     private static final Pattern WHITE_SPACES_PATTERN = Pattern.compile("\\s+");
+    // 设为 0，标识当前检查点文件的格式版本。
     static final int CURRENT_VERSION = 0;
-
+    // 封装了具体的文件 I/O 操作（如原子写入、临时文件重命名等），以保证文件写入的安全性。
+    // 先写入临时文件，再重命名
     private final CheckpointFile<Pair<TableBucket, Long>> checkpoint;
 
     public OffsetCheckpointFile(File file) throws IOException {
@@ -64,7 +72,7 @@ public final class OffsetCheckpointFile {
                         OffsetCheckpointFile.CURRENT_VERSION,
                         new OffsetCheckpointFile.Formatter());
     }
-
+    // 将内存中的位点 Map 批量写入文件。
     public void write(Map<TableBucket, Long> offsets) {
         List<Pair<TableBucket, Long>> list = new ArrayList<>(offsets.size());
         for (Map.Entry<TableBucket, Long> entry : offsets.entrySet()) {
@@ -77,7 +85,7 @@ public final class OffsetCheckpointFile {
             throw new LogStorageException(msg, e);
         }
     }
-
+    // 从磁盘读取并解析所有位点信息。
     public Map<TableBucket, Long> read() {
         List<Pair<TableBucket, Long>> list;
         try {

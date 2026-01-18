@@ -46,16 +46,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @since 0.1
  */
+// 直接负责与文件系统交互。它基于 Apache Kafka 的 FileRecords 优化而来，提供了高性能的消息持久化、检索和切片功能。
+// FileLogRecords 是 .log 数据文件的封装器。它的主要作用包括：
+// 物理存储管理：管理底层的 FileChannel，负责消息在磁盘上的实际读写。
+// 追加写入（Append）：将内存中的消息批次（MemoryLogRecords）顺序写入磁盘。
+// 逻辑视图（Slice）：支持在不拷贝数据的情况下，通过指定起始位置和大小来创建一个日志文件的“视图”。
+// 消息检索：提供基于 Offset（偏移量）和 Timestamp（时间戳）的物理位置查找功能。
+
 @PublicEvolving
 public class FileLogRecords implements LogRecords, Closeable {
-
+    // 标识当前对象是一个完整的文件还是文件的一个切片（视图）。
     private final boolean isSlice;
+    // 当前记录集的起始物理字节位置（主要用于切片）
     private final int start;
+    // 当前记录集的结束物理字节位置。
     private final int end;
 
     // mutable state
+    // 当前记录集包含的总字节数。
     private final AtomicInteger size;
+    // 对应的磁盘文件引用。
     private volatile File file;
+    // 用于执行底层 I/O 操作（读、写、截断、强制刷新）的通道。
     private final FileChannel channel;
 
     FileLogRecords(File file, FileChannel channel, int start, int end, boolean isSlice)
@@ -118,6 +130,9 @@ public class FileLogRecords implements LogRecords, Closeable {
      * @throws IOException If an I/O error occurs, see {@link FileChannel#read(ByteBuffer, long)}
      *     for details on the possible exceptions
      */
+    // 负责将磁盘数据加载到内存缓冲区（ByteBuffer）的核心方法。它通常在执行数据拉取（Fetch）或数据校验时被调用。
+    // ByteBuffer buffer: 目标缓冲区。数据将从磁盘读取并填充到这个 buffer 中。
+    // int position: 逻辑起始位置。注意，这个 position 是相对于当前 FileLogRecords 对象的起始位置而言的，而不是绝对的文件物理位置。
     public void readInto(ByteBuffer buffer, int position) throws IOException {
         FileUtils.readFully(channel, buffer, position + this.start);
         buffer.flip();
@@ -137,22 +152,26 @@ public class FileLogRecords implements LogRecords, Closeable {
      * @param size The number of bytes after the start position to include
      * @return A sliced wrapper on this message set limited based on the given position and size
      */
+    // 核心目的是范围限定。 当上层组件（如 LogSegment）需要读取日志文件的一部分（例如：从偏移量 A 到偏移量 B 之间的所有消息）时，它会调用此方法。
+    // 返回的新对象虽然共享同一个底层文件通道，但其操作范围被严格限制在指定的 position 和 size 之内。
     public FileLogRecords slice(int position, int size) throws IOException {
+        // 检查 position 是否为负数或超过了当前文件/切片的限制。
         int availableBytes = availableBytes(position, size);
         int startPosition = this.start + position;
         return new FileLogRecords(
                 file, channel, startPosition, startPosition + availableBytes, true);
     }
-
+    // 本质是一个边界安全检查器，确保任何读操作或切片操作都不会超出文件的物理边界或当前对象的逻辑边界。
     private int availableBytes(int position, int size) {
         // Cache current size in case concurrent write changes it
+        // 获取当前记录集的总字节数。
         int currentSizeInBytes = sizeInBytes();
-
+        // 起始偏移量不能为负数。
         if (position < 0) {
             throw new IllegalArgumentException(
                     "Invalid position: " + position + " in read from " + this);
         }
-
+        // 校验起始位置是否超出逻辑结尾
         if (position > currentSizeInBytes - start) {
             throw new IllegalArgumentException(
                     "Slice from position " + position + " exceeds end position of " + this);
@@ -169,7 +188,7 @@ public class FileLogRecords implements LogRecords, Closeable {
         }
         return end - (this.start + position);
     }
-
+    // 实现了“顺序写”逻辑。它接收一组已经格式化好的内存记录，利用操作系统的 FileChannel 将其一次性追加到文件的末尾，并更新当前日志段的大小。
     public int append(MemoryLogRecords records) throws IOException {
         if (records.sizeInBytes() > Integer.MAX_VALUE - size.get()) {
             throw new IllegalArgumentException(
@@ -178,7 +197,7 @@ public class FileLogRecords implements LogRecords, Closeable {
                             + " bytes is too large for segment with current file position at "
                             + size.get());
         }
-
+        // 物理执行写入
         int written = records.writeFullyTo(channel);
         size.getAndAdd(written);
         return written;
@@ -211,12 +230,14 @@ public class FileLogRecords implements LogRecords, Closeable {
      * @return {@code true} if the file was deleted by this method; {@code false} if the file could
      *     not be deleted because it did not exist
      */
+    // 负责彻底从操作系统的文件系统中移除当前的 .log 文件。它采用“先关闭、后删除”的策略，确保在删除过程中不会因为文件句柄（File Handle）被占用而导致删除失败
     public boolean deleteIfExists() throws IOException {
         IOUtils.closeQuietly(channel, "FileChannel");
         return Files.deleteIfExists(file.toPath());
     }
 
     /** Trim file when close or roll to next file. */
+    // 核心作用是将底层磁盘文件的物理大小调整为与当前数据的逻辑大小完全一致。
     public void trim() throws IOException {
         truncateTo(sizeInBytes());
     }
@@ -242,6 +263,8 @@ public class FileLogRecords implements LogRecords, Closeable {
      * @param targetSize The size to truncate to. Must be between 0 and sizeInBytes.
      * @return The number of bytes truncated off
      */
+    // 对 .log 文件的**截断（Truncate）**操作。
+    // 它允许将文件收缩到指定的大小，通常用于清理文件末尾的空白预分配空间，或者在故障恢复时删除损坏的不完整消息批次。
     public int truncateTo(int targetSize) throws IOException {
         int originalSize = sizeInBytes();
         if (targetSize > originalSize || targetSize < 0) {
@@ -265,7 +288,7 @@ public class FileLogRecords implements LogRecords, Closeable {
     public int sizeInBytes() {
         return size.get();
     }
-
+    // 是 FileLogRecords 提供给上层业务（如查询、消费、数据校验）的核心数据读取入口。
     @Override
     public Iterable<LogRecordBatch> batches() {
         Iterable<FileChannelLogRecordBatch> it = batchesFrom(start);
