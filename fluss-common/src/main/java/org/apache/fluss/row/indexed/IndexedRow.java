@@ -71,20 +71,36 @@ import static org.apache.fluss.utils.Preconditions.checkArgument;
  *
  * <p>Tradeoff: Sacrifice cpu for space. As long as there is a read, all fields are accessed.
  */
+// Apache Fluss 框架中一种非常关键的二进制行实现。
+// 它不仅实现了 InternalRow（逻辑视图）和 BinaryRow（物理视图），还专门通过索引列表设计来解决非定长数据的访问问题。
+// IndexedRow 的核心作用是提供一种支持部分随机访问的紧凑二进制存储格式。
+// 在二进制行格式中，如果所有字段都是定长的（如 INT, LONG），我们可以轻松计算出每个字段的偏移量。但一旦包含变长字段（如 STRING, BYTES），后面的字段位置就会偏移。
+// IndexedRow 通过在行头部维护一个“变长字段长度列表”，使得系统能够计算出任意字段的物理位置。
+// Null BitSet: 记录哪些字段是 Null（每字段占 1 bit）。
+// Variable Column Length List: 记录所有变长字段的实际长度（每个 4 字节）。
+// Values: 所有的字段数据按顺序紧凑排列。
+
 @Internal
 public class IndexedRow implements BinaryRow, NullAwareGetters {
+    // 静态常量，固定为 4 字节（int32），用于存储一个变长字段的长度。
     public static final int VARIABLE_COLUMN_LENGTH_SIZE = Integer.BYTES;
-
+    // 字段数量（列数）
     private final int arity;
+    // Null 标志位占用的字节数。计算公式为 $(arity + 7) / 8$
     private final int nullBitsSizeInBytes;
     // nullBitSet size + variable column length list size.
+    // 头部总大小，等于 Null BitSet + 变长字段长度列表
     private final int headerSizeInBytes;
+    // 存储每一列的 DataType
     private final DataType[] fieldTypes;
-
+    // 指向底层的物理内存块。目前主要支持单内存段。
     private MemorySegment segment;
     private MemorySegment[] segments;
+    // 该行在内存段中的起始绝对位置
     private int offset;
+    // 该行数据占用的总字节数。
     private int sizeInBytes;
+    // 存储了当前行所有字段的实际物理长度（定长字段从 Schema 获取，变长字段从文件头部读取）
     private int[] columnLengths;
 
     public IndexedRow(DataType[] fieldTypes) {
@@ -495,6 +511,7 @@ public class IndexedRow implements BinaryRow, NullAwareGetters {
         return (arity + 7) / 8;
     }
 
+    // 判断是否定长数据类型
     public static boolean isFixedLength(DataType dataType) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:

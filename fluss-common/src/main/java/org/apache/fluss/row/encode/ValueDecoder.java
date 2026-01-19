@@ -35,10 +35,20 @@ import static org.apache.fluss.utils.MapUtils.newConcurrentHashMap;
  * A decoder to decode a schema id and {@link BinaryRow} from a byte array value which is encoded by
  * {@link ValueEncoder#encodeValue(short, BinaryRow)}.
  */
-public class ValueDecoder {
+// ValueDecoder 是 Apache Fluss 框架中负责将底层物理存储的 Value 字节还原为结构化行对象的高层解码器。它是 ValueEncoder 的逆向操作实现。
+// 在 Fluss 的 KV 存储中，为了支持 Schema 的版本演进（Schema Evolution），每一条记录的 Value 并不是纯粹的数据，而是采用 [Schema ID (2字节)] + [Row Binary Data] 的格式进行打包存储。
+// 解析 Schema ID：从字节流的前两个字节中提取 Schema 版本号。
+// 动态获取元数据：根据 Schema ID 找到对应的字段类型定义。
+// 还原数据行：利用匹配的 RowDecoder 将剩余的二进制数据转换为可读的 BinaryRow。
+// 封装结果：将解析出的 Schema ID 和 Row 封装进 BinaryValue 对象返回。
 
+public class ValueDecoder {
+    // 作为 RowDecoder 的线程安全缓存。
+    // 由于系统中可能存在多个版本的 Schema，每个版本都需要一个专门的 RowDecoder。该属性使用 ConcurrentHashMap 缓存已经创建过的解码器，避免每次解码都去重新解析 Schema 或创建对象，从而大幅提升解码吞吐量。
     private final Map<Short, RowDecoder> rowDecoders;
+    // 元数据查询器接口
     private final SchemaGetter schemaGetter;
+    // 定义存储格式（如 INDEXED 或 COMPACTED）
     private final KvFormat kvFormat;
 
     public ValueDecoder(SchemaGetter schemaGetter, KvFormat kvFormat) {

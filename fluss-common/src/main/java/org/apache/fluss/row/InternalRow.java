@@ -83,6 +83,11 @@ import static org.apache.fluss.types.DataTypeChecks.getScale;
  *
  * @since 0.1
  */
+// InternalRow 是 Apache Fluss 内部非常关键的一个基础接口。它定义了系统中**行数据（Row）**的通用表现形式和访问规范。
+// 统一数据模型：它为所有的 SQL 数据类型（如 INT, STRING, DECIMAL 等）与 Java 内部表示（如 int, BinaryString, Decimal 等）之间建立了一一对应的映射关系。
+// 解耦物理存储：无论底层数据是存储在内存（如 GenericRow）、二进制字节（如 BinaryRow）还是列式存储（如 ColumnarRow）中，顶层逻辑都可以通过 InternalRow 接口以统一的方式读取。
+// 高效访问：它继承了 DataGetters 接口，提供了一系列类型化的 Getter 方法（如 getInt, getString），避免了频繁的装箱和拆箱操作。
+
 @PublicEvolving
 public interface InternalRow extends DataGetters {
 
@@ -91,6 +96,7 @@ public interface InternalRow extends DataGetters {
      *
      * <p>The number does not include {@link ChangeType}. It is kept separately.
      */
+    // 返回当前行中字段（列）的总数。
     int getFieldCount();
 
     // ------------------------------------------------------------------------------------------
@@ -98,6 +104,8 @@ public interface InternalRow extends DataGetters {
     // ------------------------------------------------------------------------------------------
 
     /** Returns the data class for the given {@link DataType}. */
+    // 根据传入的 DataType（逻辑数据类型），返回其对应的 Java 内部类。
+    // 示例：传入 STRING 类型，返回 BinaryString.class；传入 BIGINT，返回 Long.class。
     static Class<?> getDataClass(DataType type) {
         // ordered by type root definition
         switch (type.getTypeRoot()) {
@@ -145,6 +153,7 @@ public interface InternalRow extends DataGetters {
      *
      * @param rowType the row type of the internal row
      */
+    // 为一整行数据批量创建访问器数组。
     static FieldGetter[] createFieldGetters(RowType rowType) {
         final FieldGetter[] fieldGetters = new FieldGetter[rowType.getFieldCount()];
         for (int i = 0; i < rowType.getFieldCount(); i++) {
@@ -160,6 +169,7 @@ public interface InternalRow extends DataGetters {
      * @param fieldType the element type of the row
      * @param fieldPos the element position of the row
      */
+    // 为特定的字段创建**浅拷贝（Shallow）**访问器。
     static FieldGetter createFieldGetter(DataType fieldType, int fieldPos) {
         final FieldGetter fieldGetter;
         // ordered by type root definition
@@ -249,6 +259,9 @@ public interface InternalRow extends DataGetters {
      * VectorizedColumnBatch#getString(int, int)}. This can be removed once we supports object reuse
      * for Arrow {@link ColumnarRow}, see {@code CompletedFetch#toScanRecord(LogRecord)}.
      */
+    // 为特定的字段创建**深拷贝（Deep）**访问器。
+    // 主要用于处理复杂嵌套类型（Array, Map, Row）
+    // 在处理列式存储（Arrow 格式）时，为了防止底层的内存 Buffer 被释放导致无法访问，需要将嵌套结构的数据真正地拷贝出来，转换为 GenericArray 或 GenericMap。
     static FieldGetter createDeepFieldGetter(DataType fieldType, int fieldPos) {
         final FieldGetter fieldGetter;
         switch (fieldType.getTypeRoot()) {

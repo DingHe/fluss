@@ -399,6 +399,7 @@ public final class KvTablet {
         }
     }
 
+    // 主要任务是：遍历客户端发送的记录批次，将每一条记录分发给相应的“更新（Upsert）”或“删除（Deletion）”逻辑进行处理。
     private void processKvRecords(
             KvRecordBatch kvRecords,
             short schemaIdOfNewData,
@@ -407,19 +408,27 @@ public final class KvTablet {
             PaddingRow latestSchemaRow,
             long startLogOffset)
             throws Exception {
+        // 初始化当前的日志位点（Offset）。
+        // 在 Fluss 中，每一条 CDC 变更都会分配一个唯一的连续位点。
         long logOffset = startLogOffset;
 
         // TODO: reuse the read context and decoder
+        // 创建读取上下文。它根据当前的 KV 存储格式（kvFormat）和 Schema 信息，告诉系统如何正确解析二进制数据块。
         KvRecordBatch.ReadContext readContext =
                 KvRecordReadContext.createReadContext(kvFormat, schemaGetter);
+        // 创建值解码器。当需要从存储中读取旧数据（Old Value）进行合并时，用它将二进制字节数组转回 Java 对象。
         ValueDecoder valueDecoder = new ValueDecoder(schemaGetter, kvFormat);
 
         for (KvRecord kvRecord : kvRecords.records(readContext)) {
+            // 解析 Key 和 Value
             byte[] keyBytes = BytesUtils.toArray(kvRecord.getKey());
+            // 将字节数组包装成 KvPreWriteBuffer.Key 对象，方便后续在预写缓冲区中进行查找和插入。
             KvPreWriteBuffer.Key key = KvPreWriteBuffer.Key.of(keyBytes);
             BinaryRow row = kvRecord.getRow();
             BinaryValue currentValue = row == null ? null : new BinaryValue(schemaIdOfNewData, row);
-
+            // 如果 row 为 null，说明这是一个删除操作
+            // 处理删除 (Deletion)
+            // 它会检查删除策略，并决定是直接在 KV 存储中标记删除，还是根据合并引擎产生特定的 CDC 日志。
             if (currentValue == null) {
                 logOffset =
                         processDeletion(
@@ -430,6 +439,7 @@ public final class KvTablet {
                                 latestSchemaRow,
                                 logOffset);
             } else {
+            // 分支 B：处理更新/插入 (Upsert)
                 logOffset =
                         processUpsert(
                                 key,
@@ -443,6 +453,8 @@ public final class KvTablet {
         }
     }
 
+    // 负责处理主键表中的删除请求。
+    // 在 Apache Fluss 中，删除操作不仅仅是简单地抹除数据，还需要根据业务配置（合并引擎、删除行为）来决定如何生成 CDC 日志以及如何更新 KV 状态。
     private long processDeletion(
             KvPreWriteBuffer.Key key,
             RowMerger currentMerger,
@@ -451,16 +463,19 @@ public final class KvTablet {
             PaddingRow latestSchemaRow,
             long logOffset)
             throws Exception {
+        // 首先询问当前使用的 RowMerger（合并引擎）它是如何看待删除操作的。
         DeleteBehavior deleteBehavior = currentMerger.deleteBehavior();
         if (deleteBehavior == DeleteBehavior.IGNORE) {
+            // 如果合并引擎尚不支持删除，则跳过删除行
             // skip delete rows if the merger doesn't support yet
             return logOffset;
         } else if (deleteBehavior == DeleteBehavior.DISABLE) {
+            // 如果表配置显式禁用了删除功能，直接抛出异常，防止非法操作。
             throw new DeletionDisabledException(
                     "Delete operations are disabled for this table. "
                             + "The table.delete.behavior is set to 'disable'.");
         }
-
+        // 为了删除数据，系统必须先知道数据是否存在。它会先查 Pre-write Buffer，再查 RocksDB。
         byte[] oldValueBytes = getFromBufferOrKv(key);
         if (oldValueBytes == null) {
             LOG.debug(
@@ -473,13 +488,17 @@ public final class KvTablet {
         BinaryValue newValue = currentMerger.delete(oldValue);
 
         // if newValue is null, it means the row should be deleted
+        // 向 WAL 日志添加一条 DELETE 类型的记录，并在 kvPreWriteBuffer 中标记该 Key 为删除状态（Tombstone）
         if (newValue == null) {
             return applyDelete(key, oldValue, walBuilder, latestSchemaRow, logOffset);
         } else {
+            // 如果引擎返回了一个不为 null 的新值。
+            // 通常发生在复杂的合并逻辑中，删除请求实际上触发了数据的某种变更。它会向 WAL 添加 UPDATE_BEFORE / UPDATE_AFTER 记录
             return applyUpdate(key, oldValue, newValue, walBuilder, latestSchemaRow, logOffset);
         }
     }
-
+    // processUpsert 是 KvTablet 中处理数据写入（更新或插入）的核心逻辑。
+    // 它体现了 Fluss 如何通过“读-改-写”（Read-Modify-Write）机制来支持复杂的合并引擎（Merge Engine）以及如何通过优化手段提升性能。
     private long processUpsert(
             KvPreWriteBuffer.Key key,
             BinaryValue currentValue,
@@ -493,11 +512,16 @@ public final class KvTablet {
         // partial update), we can skip fetching old value for better performance since it
         // always returns new value. In this case, both INSERT and UPDATE will produce
         // UPDATE_AFTER.
+        // 优化：当使用 WAL 模式且合并器是 DefaultRowMerger（全量更新而非部分列更新）时，
+        // 我们可以跳过获取旧值的步骤以提升性能，因为此时总是返回新值。
+        // 背景：通常更新操作需要先读旧值（确定是 INSERT 还是 UPDATE），但读取磁盘/索引是有开销的。
+        // 逻辑：如果配置为 WAL 模式（变更日志仅包含新值快照）且使用的是 DefaultRowMerger（直接覆盖模式），则不检查旧值。
         if (changelogImage == ChangelogImage.WAL && currentMerger instanceof DefaultRowMerger) {
             return applyUpdate(key, null, currentValue, walBuilder, latestSchemaRow, logOffset);
         }
-
+        // 尝试获取该主键对应的当前值。
         byte[] oldValueBytes = getFromBufferOrKv(key);
+        // 如果旧值不存在，说明这是一条全新的数据。
         if (oldValueBytes == null) {
             return applyInsert(key, currentValue, walBuilder, latestSchemaRow, logOffset);
         }
@@ -587,7 +611,7 @@ public final class KvTablet {
                 throw new IllegalArgumentException("Unsupported log format: " + logFormat);
         }
     }
-
+    // 把缓存的记录刷到rocksdb
     public void flush(long exclusiveUpToLogOffset, FatalErrorHandler fatalErrorHandler) {
         // todo: need to introduce a backpressure mechanism
         // to avoid too much records in kvPreWriteBuffer
@@ -639,6 +663,7 @@ public final class KvTablet {
     }
 
     // get from kv pre-write buffer first, if can't find, get from rocksdb
+    // 首先在缓存中找key是否存在，不存在则到rocksdb里面找
     private byte[] getFromBufferOrKv(KvPreWriteBuffer.Key key) throws IOException {
         KvPreWriteBuffer.Value value = kvPreWriteBuffer.get(key);
         if (value == null) {
